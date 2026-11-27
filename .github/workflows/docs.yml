@@ -64,3 +64,18 @@ jobs:
           }
           RS
           cargo test --locked -p synctv-media-providers --lib youtube::challenge -- --nocapture
+  source-diagnostics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check player setup calls in an isolated JavaScript context
+        run: |
+          npm install --ignore-scripts --no-save --prefix "$RUNNER_TEMP" acorn@8.15.0
+          curl --fail --location --retry 3 --max-time 30 \
+            'https://www.youtube.com/s/player/b485e332/player_ias.vflset/en_US/base.js' \
+            --output "$RUNNER_TEMP/synctv-base.js"
+          SYNCTV_PLAYER_JS="$RUNNER_TEMP/synctv-base.js" SYNCTV_ACORN="$RUNNER_TEMP/node_modules/acorn" \
+            node --stack-size=7600 docs/player-scope-probe.cjs
