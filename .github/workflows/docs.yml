@@ -11,6 +11,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   SQLX_OFFLINE: true
+  RUST_MIN_STACK: "16777216"
 
 jobs:
   player-script:
@@ -51,9 +52,12 @@ jobs:
               fn solves_current_public_player() {
                   let path = std::env::var("SYNCTV_PLAYER_JS").expect("fixture path");
                   let source = std::fs::read_to_string(path).expect("read public player");
+                  eprintln!("preparing public player");
                   let solver = YoutubeChallengeSolver::prepare(&source).expect("prepare public player");
+                  eprintln!("public player prepared, solving n");
                   let input = "abcd1234EFGH5678";
                   let output = solver.solve_n(input).expect("solve public player n");
+                  eprintln!("public player n solved");
                   assert!(!output.is_empty());
                   assert_ne!(output, input);
               }
