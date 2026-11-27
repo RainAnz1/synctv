@@ -1,4 +1,4 @@
-name: YouTube player smoke
+name: SyncTV NAS preview image
 
 on:
   push:
@@ -8,62 +8,80 @@ permissions:
   contents: read
 
 env:
+  BASE_REV: 8d169a7f218b72fb5843ab56b14ab2460e27c71f
+  UPSTREAM_REV: ce86f424fae323eca37d5b41de36cb32670d82a1
+  FIX_REV: ac22d55e20ac0670120c4871fae2e3316ecb41b0
+  IMAGE_TAG: synctv-preview:1.0.18-youtube-ac22d55e
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   SQLX_OFFLINE: true
 
 jobs:
-  player-script:
+  nas-image:
+    name: Build Linux amd64 image for the NAS
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: fix/youtube-player-scope
+          ref: ac22d55e20ac0670120c4871fae2e3316ecb41b0
+          fetch-depth: 0
           persist-credentials: false
+      - name: Apply the YouTube-only patch to SyncTV 1.0.18
+        shell: bash
+        run: |
+          git merge-base --is-ancestor "$BASE_REV" "$FIX_REV"
+          git diff --binary "$UPSTREAM_REV" "$FIX_REV" -- Cargo.toml Cargo.lock synctv-media-providers/Cargo.toml synctv-media-providers/src/youtube/challenge.rs > "$RUNNER_TEMP/youtube.patch"
+          test -s "$RUNNER_TEMP/youtube.patch"
+          git switch --detach "$BASE_REV"
+          git apply --check "$RUNNER_TEMP/youtube.patch"
+          git apply "$RUNNER_TEMP/youtube.patch"
+          git diff --check
+          git diff --stat
+      - name: Make room for the native container build
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-11-11
-      - name: Install system build dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler nasm libclang-dev lld
-      - uses: Swatinem/rust-cache@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
         with:
-          shared-key: youtube-player-smoke
-          cache-workspace-crates: true
-          env-vars: CARGO
-          cache-on-failure: true
-      - name: Download the public player script linked by the affected video
+          channel: stable
+          flutter-version: 3.47.9
+          cache: true
+      - name: Build the release Web UI
+        env:
+          SYNCTV_WEB_CONFIG: synctv-web-ui/web-ui.production.toml
         run: |
-          curl --fail --location --retry 3 --max-time 30 \
-            'https://www.youtube.com/s/player/b485e332/player_ias.vflset/en_US/base.js' \
-            --output "$RUNNER_TEMP/synctv-base.js"
-          head -c 90 "$RUNNER_TEMP/synctv-base.js"
-          printf '\n'
-          echo "SYNCTV_PLAYER_JS=$RUNNER_TEMP/synctv-base.js" >> "$GITHUB_ENV"
-      - name: Verify the parser against the public player script
+          make web-ui-build WEB_UI_EXPORT_DIR="$(pwd)/synctv-web-ui/dist"
+          test -f synctv-web-ui/dist/index.html
+      - name: Build the container with the release profile
+        env:
+          DOCKER_BUILDKIT: "1"
         run: |
-          git rev-parse HEAD
-          cat >> synctv-media-providers/src/youtube/challenge.rs <<'RS'
-
-          #[cfg(test)]
-          mod hosted_player_smoke {
-              use super::YoutubeChallengeSolver;
-
-              #[test]
-              fn solves_current_public_player() {
-                  let path = std::env::var("SYNCTV_PLAYER_JS").expect("fixture path");
-                  let source = std::fs::read_to_string(path).expect("read public player");
-                  eprintln!("preparing public player");
-                  let solver = YoutubeChallengeSolver::prepare(&source).expect("prepare public player");
-                  eprintln!("public player prepared, solving n");
-                  let input = "abcd1234EFGH5678";
-                  let started = std::time::Instant::now();
-                  let output = solver.solve_n(input).expect("solve public player n");
-                  eprintln!("public player evaluation took {:?}", started.elapsed());
-                  eprintln!("public player n solved");
-                  assert_eq!(output.len(), 13);
-                  assert_ne!(output, input);
-              }
-          }
-          RS
-          cargo test --locked -p synctv-media-providers --lib youtube::challenge -- --nocapture
+          docker build \
+            --platform linux/amd64 \
+            --build-arg SYNCTV_BUILD_FEATURES=k8s,mimalloc,openapi,web-ui \
+            --build-arg SYNCTV_CARGO_BUILD_ARGS=--locked \
+            --build-arg CARGO_TERM_COLOR=always \
+            --label "org.opencontainers.image.revision=$FIX_REV" \
+            --label "io.synctv.preview.base-revision=$BASE_REV" \
+            --tag "$IMAGE_TAG" .
+      - name: Verify and archive the image
+        run: |
+          test "$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$IMAGE_TAG")" = 'linux/amd64'
+          docker run --rm "$IMAGE_TAG" --version
+          mkdir -p "$RUNNER_TEMP/synctv-nas"
+          cd "$RUNNER_TEMP/synctv-nas"
+          set -o pipefail
+          docker save "$IMAGE_TAG" | gzip -1 > synctv-image.tar.gz
+          sha256sum synctv-image.tar.gz > SHA256SUMS
+          docker image inspect -f '{{.Id}}' "$IMAGE_TAG" > IMAGE_ID
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: synctv-nas-amd64-ac22d55e
+          path: ${{ runner.temp }}/synctv-nas/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
