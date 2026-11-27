@@ -1,43 +1,62 @@
-name: Docs
+name: YouTube player smoke
 
 on:
   push:
-    branches: ['**']
-    paths:
-      - ".github/workflows/docs.yml"
-      - "docs/**"
-  pull_request:
-    branches: ['**']
-    paths:
-      - ".github/workflows/docs.yml"
-      - "docs/**"
-  workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+    branches: [ci/youtube-player-scope]
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  SQLX_OFFLINE: true
+
 jobs:
-  validate:
-    name: Validate Docs
-    runs-on: ubuntu-latest
+  player-script:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: docs/package-lock.json
+          ref: fix/youtube-player-scope
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-11-11
+      - name: Install system build dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler nasm libclang-dev lld
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: youtube-player-smoke
+          cache-on-failure: true
+      - name: Download the public player script linked by the affected video
+        run: |
+          curl --fail --location --retry 3 --max-time 30 \
+            'https://www.youtube.com/s/player/b485e332/player_ias.vflset/en_US/base.js' \
+            --output "$RUNNER_TEMP/synctv-base.js"
+          head -c 90 "$RUNNER_TEMP/synctv-base.js"
+          printf '\n'
+          echo "SYNCTV_PLAYER_JS=$RUNNER_TEMP/synctv-base.js" >> "$GITHUB_ENV"
+      - name: Verify the parser against the public player script
+        run: |
+          git rev-parse HEAD
+          cat >> synctv-media-providers/src/youtube/challenge.rs <<'RS'
 
-      - name: Install docs dependencies
-        working-directory: docs
-        run: npm ci
+          #[cfg(test)]
+          mod hosted_player_smoke {
+              use super::YoutubeChallengeSolver;
 
-      - name: Validate docs
-        working-directory: docs
-        run: npm run validate
+              #[test]
+              fn solves_current_public_player() {
+                  let path = std::env::var("SYNCTV_PLAYER_JS").expect("fixture path");
+                  let source = std::fs::read_to_string(path).expect("read public player");
+                  let solver = YoutubeChallengeSolver::prepare(&source).expect("prepare public player");
+                  let input = "abcd1234EFGH5678";
+                  let output = solver.solve_n(input).expect("solve public player n");
+                  assert!(!output.is_empty());
+                  assert_ne!(output, input);
+              }
+          }
+          RS
+          cargo test --locked -p synctv-media-providers --lib youtube::challenge -- --nocapture
