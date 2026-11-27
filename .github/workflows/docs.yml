@@ -11,7 +11,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   SQLX_OFFLINE: true
-  RUST_MIN_STACK: "16777216"
 
 jobs:
   player-script:
@@ -30,6 +29,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: youtube-player-smoke
+          cache-workspace-crates: true
+          env-vars: CARGO
           cache-on-failure: true
       - name: Download the public player script linked by the affected video
         run: |
@@ -56,26 +57,13 @@ jobs:
                   let solver = YoutubeChallengeSolver::prepare(&source).expect("prepare public player");
                   eprintln!("public player prepared, solving n");
                   let input = "abcd1234EFGH5678";
+                  let started = std::time::Instant::now();
                   let output = solver.solve_n(input).expect("solve public player n");
+                  eprintln!("public player evaluation took {:?}", started.elapsed());
                   eprintln!("public player n solved");
-                  assert!(!output.is_empty());
+                  assert_eq!(output.len(), 13);
                   assert_ne!(output, input);
               }
           }
           RS
           cargo test --locked -p synctv-media-providers --lib youtube::challenge -- --nocapture
-  source-diagnostics:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Check player setup calls in an isolated JavaScript context
-        run: |
-          npm install --ignore-scripts --no-save --prefix "$RUNNER_TEMP" acorn@8.15.0
-          curl --fail --location --retry 3 --max-time 30 \
-            'https://www.youtube.com/s/player/b485e332/player_ias.vflset/en_US/base.js' \
-            --output "$RUNNER_TEMP/synctv-base.js"
-          SYNCTV_PLAYER_JS="$RUNNER_TEMP/synctv-base.js" SYNCTV_ACORN="$RUNNER_TEMP/node_modules/acorn" \
-            node --stack-size=7600 docs/player-scope-probe.cjs
